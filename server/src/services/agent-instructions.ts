@@ -23,7 +23,17 @@ const IGNORED_INSTRUCTIONS_DIRECTORY_NAMES = new Set([
   "__pycache__",
   "node_modules",
   "venv",
+  // Common non-instruction directories that should never be scanned
+  "bin",
+  "cache",
+  "checkpoints",
+  "cron",
+  "logs",
+  "sandboxes",
+  "sessions",
+  "state",
 ]);
+const PAPERCLIPIGNORE_FILE = ".paperclipignore";
 
 type BundleMode = "managed" | "external";
 
@@ -173,6 +183,9 @@ function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boo
 async function listFilesRecursive(rootPath: string): Promise<string[]> {
   const output: string[] = [];
 
+  // Load .paperclipignore patterns if present
+  const ignorePatterns = await loadPaperclipIgnore(rootPath);
+
   async function walk(currentPath: string, relativeDir: string) {
     const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -181,17 +194,117 @@ async function listFilesRecursive(rootPath: string): Promise<string[]> {
       const relativePath = normalizeRelativeFilePath(
         relativeDir ? path.posix.join(relativeDir, entry.name) : entry.name,
       );
+      // Check .paperclipignore patterns (only prunes directories, filters files)
       if (entry.isDirectory()) {
-        await walk(absolutePath, relativePath);
+        if (!isIgnoredByPaperclipIgnore(relativePath, ignorePatterns, true)) {
+          await walk(absolutePath, relativePath);
+        }
         continue;
       }
       if (!entry.isFile()) continue;
-      output.push(relativePath);
+      if (!isIgnoredByPaperclipIgnore(relativePath, ignorePatterns, false)) {
+        output.push(relativePath);
+      }
     }
   }
 
   await walk(rootPath, "");
   return output.sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Parses a .paperclipignore file from the bundle root.
+ * Format: one glob pattern per line. Lines starting with # are comments.
+ * Lines starting with ! are negation patterns (un-ignore).
+ * Trailing / means directory-only. Leading / means root-relative.
+ */
+async function loadPaperclipIgnore(rootPath: string): Promise<IgnorePattern[]> {
+  const ignorePath = path.join(rootPath, PAPERCLIPIGNORE_FILE);
+  const content = await fs.readFile(ignorePath, "utf8").catch(() => "");
+  if (!content) return [];
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((raw) => {
+      const negated = raw.startsWith("!");
+      const pattern = negated ? raw.slice(1) : raw;
+      const directoryOnly = pattern.endsWith("/");
+      const normalizedPattern = directoryOnly ? pattern.slice(0, -1) : pattern;
+      const rootRelative = normalizedPattern.startsWith("/");
+      const cleanPattern = rootRelative ? normalizedPattern.slice(1) : normalizedPattern;
+      return { pattern: cleanPattern, negated, directoryOnly, rootRelative };
+    });
+}
+
+type IgnorePattern = {
+  pattern: string;
+  negated: boolean;
+  directoryOnly: boolean;
+  rootRelative: boolean;
+};
+
+function isIgnoredByPaperclipIgnore(
+  relativePath: string,
+  patterns: IgnorePattern[],
+  isDir: boolean,
+): boolean {
+  if (patterns.length === 0) return false;
+
+  let ignored = false;
+  for (const { pattern, negated, directoryOnly, rootRelative } of patterns) {
+    if (directoryOnly && !isDir) continue;
+
+    let matches: boolean;
+    if (rootRelative) {
+      // Only match from the root of the bundle
+      matches = globMatch(relativePath, pattern);
+    } else {
+      // Match anywhere in the path — check basename and full path
+      const basename = path.posix.basename(relativePath);
+      matches = globMatch(basename, pattern) || globMatch(relativePath, pattern);
+    }
+
+    if (matches) {
+      ignored = !negated;
+    }
+  }
+  return ignored;
+}
+
+/**
+ * Simple glob matcher supporting * (any non-slash) and ** (any including slash).
+ */
+function globMatch(input: string, pattern: string): boolean {
+  // Convert glob to regex
+  const regexParts: string[] = ["^"];
+  let i = 0;
+  while (i < pattern.length) {
+    if (pattern[i] === "*" && pattern[i + 1] === "*") {
+      regexParts.push(".*");
+      i += 2;
+      // Skip trailing slash after **
+      if (pattern[i] === "/") i += 1;
+    } else if (pattern[i] === "*") {
+      regexParts.push("[^/]*");
+      i += 1;
+    } else if (pattern[i] === "?") {
+      regexParts.push("[^/]");
+      i += 1;
+    } else if (".+^${}()|[]".includes(pattern[i]!)) {
+      regexParts.push(`\\${pattern[i]}`);
+      i += 1;
+    } else {
+      regexParts.push(pattern[i]!);
+      i += 1;
+    }
+  }
+  regexParts.push("$");
+  try {
+    return new RegExp(regexParts.join("")).test(input);
+  } catch {
+    return false;
+  }
 }
 
 async function readFileSummary(rootPath: string, relativePath: string, entryFile: string): Promise<AgentInstructionsFileSummary> {
