@@ -274,6 +274,62 @@ describe("agent permission routes", () => {
     expect(res.body.access.taskAssignSource).toBe("agent_creator");
   });
 
+  it("allows agent with canCreateAgents to create agents via POST /agents", async () => {
+    const creatorAgent = {
+      ...baseAgent,
+      permissions: { canCreateAgents: true },
+    };
+    mockAgentService.getById.mockResolvedValue(creatorAgent);
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "NewAgent",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockAgentService.create).toHaveBeenCalled();
+  });
+
+  it("rejects agent without canCreateAgents from POST /agents", async () => {
+    const restrictedAgent = {
+      ...baseAgent,
+      permissions: { canCreateAgents: false },
+    };
+    mockAgentService.getById.mockResolvedValue(restrictedAgent);
+
+    const app = createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "NewAgent",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
   it("exposes a dedicated agent route for the inbox mine view", async () => {
     mockIssueService.list.mockResolvedValue([
       {
