@@ -58,6 +58,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     icon: Sparkles,
     recommended: true,
   },
+  claude_ssh_docker: {
+    label: "Claude (SSH/Docker)",
+    description: "Claude Code via SSH or Docker",
+    icon: Sparkles,
+  },
   codex_local: {
     label: "Codex",
     description: "Local Codex agent",
